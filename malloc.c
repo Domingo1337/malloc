@@ -1,3 +1,7 @@
+/* Imię nazwisko: Dominik Gulczyński
+ * Numer indeksu: 299391
+ */
+
 #include "malloc.h"
 #include <dlfcn.h>
 #include <sys/queue.h>
@@ -171,62 +175,132 @@ void *create_new_arena(size_t size) {
   LIST_INIT(&arena->ma_freeblks);
   LIST_INSERT_HEAD(&arena->ma_freeblks, block, mb_link);
 
-  mem_block_t *last = (mem_block_t *)(get_boundary_tag(block) + 1);
+  mem_block_t *last = get_next_block(block);
   last->mb_size = 0;
   set_boundary_tag(last);
+  debug("arena@%p ends with block@%p", arena, last);
 
   return block;
 }
 
 /* print structures */
-void dump_block(mem_block_t *block) {
-  debug("\tblock @ %p {", block);
-  debug("size: %ld", block->mb_size);
-  debug(", bdtag: %ld }\n", *get_boundary_tag(block));
+
+void print_block(mem_block_t *block) {
+  debug("\t\tblock @ %p {size: %ld, bdtag: %ld }", block, block->mb_size,
+        *get_boundary_tag(block));
 }
 
-void dump_arena(mem_arena_t *arena) {
-  debug("arena @ %p{\n", arena);
-  debug("\tsize:\t%ld\n", arena->size);
-  debug("\ttag:\t%ld\n", arena->tag);
-  debug("\tfreeblks: \t");
+void print_arena(mem_arena_t *arena) {
+  debug("\tarena @ %p{", arena);
+  debug("\t\tsize:\t%ld", arena->size);
+  debug("\t\ttag:\t%ld", arena->tag);
+  debug("\t\tfreeblks:");
+  void *max_addr = (void *)arena + arena->size + FREE_ARENA_SIZE;
   mem_block_t *current;
   LIST_FOREACH(current, &arena->ma_freeblks, mb_link) {
-    debug("|%p|", current);
+    debug("\t|%p|", current);
+    if ((void *)current >= max_addr) {
+      debug("block out of arena, stop freebloks loop");
+      break;
+    }
   }
-  debug("\n\tfst:\t%p\n", &arena->ma_first);
-  debug("} bloks:\n");
+  debug("\t\tfst:\t%p} bloks:", &arena->ma_first);
   current = &arena->ma_first;
-  dump_block(current);
+  print_block(current);
   do {
     current = get_next_block(current);
-    dump_block(current);
+    print_block(current);
   } while (current->mb_size != 0);
 }
 
-void dump_malloc() {
-  debug("my malloc arenas:\n");
+void print_all() {
   mem_arena_t *arena;
   LIST_FOREACH(arena, arenas, ma_link) {
-    dump_arena(arena);
+    print_arena(arena);
   }
 }
 
-/* dummies */
-void *my_memalign(size_t alignment, size_t size) {
+/* check integrity */
+
+bool check_arena(mem_arena_t *arena) {
+  // check freebloks
+  mem_block_t *current;
+  LIST_FOREACH(current, &arena->ma_freeblks, mb_link) {
+    if (current->mb_size <= 0) {
+      debug("free block@%p->mb_size: %ld", current, current->mb_size);
+      // set_boundary_tag(current);
+      return false;
+    }
+  }
+  void *arena_last_addr = (void *)arena + arena->size + FREE_ARENA_SIZE;
+  int64_t size_sum = 0;
+  current = &arena->ma_first;
+  do {
+    bdtag_t *tag_addr = get_boundary_tag(current);
+    if ((void *)tag_addr > arena_last_addr) {
+      debug("\n========\n%s failed\n\n", __func__);
+      debug("block@%p->mb_size: %ld (tag_addr: %p)", current, current->mb_size,
+            tag_addr);
+      debug("out of arena[%p : %p] of size %ld)", arena, arena_last_addr,
+            arena->size);
+      print_arena(arena);
+      return false;
+    }
+    if (*tag_addr != current->mb_size) {
+      debug("block@%p->mb_size: %ld, bdtag: %ld", current, current->mb_size,
+            *tag_addr);
+      // set_boundary_tag(current);
+      return false;
+    }
+
+    size_sum += current->mb_size;
+    if (size_sum > arena->size) {
+      debug("blocks of arena@%p exceed size", arena);
+      return false;
+    }
+
+    current = get_next_block(current);
+  } while (current->mb_size);
+  return true;
+}
+
+bool check_integrity() {
+  debug("performing integirty check ...");
+  mem_arena_t *arena;
+  LIST_FOREACH(arena, arenas, ma_link) {
+    if (!check_arena(arena)) {
+      debug("%s failed", __func__);
+      print_all();
+      exit(1);
+    }
+  }
+  debug("integrity ok");
+  return true;
+}
+
+/* functions */
+
+void *__my_memalign(size_t alignment, size_t size) {
+  void *res;
+
   if (size == 0) {
-    return NULL;
+    res = NULL;
+    debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+    return res;
   }
 
   if (size >= MAX_MEM) {
     errno = ENOMEM;
-    return NULL;
+    res = NULL;
+    debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+    return res;
   }
 
-  if (!powerof2(alignment) || alignment == 0 ||
-      alignment % (2 * sizeof(void *)) != 0) {
+  if (!powerof2(alignment) || alignment == 0 || alignment % MB_ALIGNMENT != 0) {
     errno = EINVAL;
-    return NULL;
+    res = NULL;
+    debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+    return res;
   }
 
   // we gotta make sure that the pointer can be aligned so we request a lil more
@@ -248,8 +322,11 @@ void *my_memalign(size_t alignment, size_t size) {
 
   if (block == NULL) {
     errno = ENOMEM;
+
     pthread_mutex_unlock(&mutex);
-    return NULL;
+    res = NULL;
+    debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+    return res;
   }
 
   int64_t free_mem = block->mb_size - size;
@@ -264,33 +341,34 @@ void *my_memalign(size_t alignment, size_t size) {
   }
 
   assert(block->mb_size > 0);
-
   block->mb_size *= -1;
   LIST_REMOVE(block, mb_link);
-
-  assert(block->mb_size < 0);
   set_boundary_tag(block);
 
   // align user ptr and fill empty space with zeros for free() convenience
-  void *ptr = (void *)round_up_to((size_t)block->mb_data, alignment);
-  memset(block->mb_data, 0, ptr - (void *)block->mb_data);
+  res = (void *)round_up_to((size_t)block->mb_data, alignment);
+  memset(block->mb_data, 0, res - (void *)block->mb_data);
 
   pthread_mutex_unlock(&mutex);
-  return ptr;
+  debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+  return res;
 }
 
-void *my_malloc(size_t size) {
+void *__my_malloc(size_t size) {
+  void *res;
   if (size == 0) {
-    return NULL;
+    res = NULL;
+    debug("%s(%ld) = %p", __func__, size, res);
+    return res;
   }
-  void *ptr = my_memalign(MB_ALIGNMENT, size);
-  if (ptr == NULL && errno == ENOMEM) {
-    return NULL;
-  }
-  return ptr;
+
+  res = __my_memalign(MB_ALIGNMENT, size);
+  debug("%s(%ld) = %p", __func__, size, res);
+  return res;
 }
 
-void my_free(void *ptr) {
+void __my_free(void *ptr) {
+  debug("%s(%p)", __func__, ptr);
   if (ptr == NULL)
     return;
 
@@ -322,6 +400,8 @@ void my_free(void *ptr) {
     prev = get_prev_block(current);
   }
 
+  assert(current->mb_size > 0);
+
   mem_arena_t *arena = get_arena_from_block(current);
   if (prev == NULL && next->mb_size == 0 && should_delete(arena)) {
     LIST_REMOVE(arena, ma_link);
@@ -334,29 +414,41 @@ void my_free(void *ptr) {
   pthread_mutex_unlock(&mutex);
 }
 
-void *my_realloc(void *ptr, size_t size) {
+void *__my_realloc(void *ptr, size_t size) {
+  void *res;
+
   if (ptr == NULL && size == 0) {
-    return NULL;
+    res = NULL;
+    debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
+    return res;
   }
 
-  if (ptr == NULL)
-    return my_malloc(size);
+  if (ptr == NULL) {
+
+    res = __my_malloc(size);
+    debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
+    return res;
+  }
 
   if (size == 0) {
-    my_free(ptr);
-    return NULL;
+    res = NULL;
+    debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
+    __my_free(ptr);
+    return res;
   }
-  
+
   pthread_mutex_lock(&mutex);
 
   int64_t isize = isize;
 
   mem_block_t *current_block = get_block(ptr);
-  void *tag_addr = (void *)get_boundary_tag(current_block);
   int64_t current_size = (void *)get_boundary_tag(current_block) - ptr;
+
   if (size < (size_t)current_size) {
     pthread_mutex_unlock(&mutex);
-    return ptr;
+    res = ptr;
+    debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
+    return res;
   }
 
   mem_block_t *next_block = get_next_block(current_block);
@@ -382,53 +474,32 @@ void *my_realloc(void *ptr, size_t size) {
     }
 
     pthread_mutex_unlock(&mutex);
-    return ptr;
+    res = ptr;
+    debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
+    return res;
   }
 
   pthread_mutex_unlock(&mutex);
-  void *new_ptr = my_malloc(size);
+  void *new_ptr = __my_malloc(size);
+  pthread_mutex_lock(&mutex);
   if (new_ptr == NULL) {
-    return NULL;
+    res = NULL;
+    debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
+    pthread_mutex_unlock(&mutex);
+    return res;
   }
 
   memcpy(new_ptr, ptr, current_size);
 
-  my_free(ptr);
-  return new_ptr;
-}
-
-size_t my_malloc_usable_size(void *ptr) {
-  // debug("%s(%p)", __func__, ptr);
-  return get_block(ptr)->mb_size;
-}
-
-/* wrappers */
-
-void *__my_malloc(size_t size) {
-  void *res = my_malloc(size);
-  debug("%s(%ld) = %p", __func__, size, res);
-  return res;
-}
-
-void *__my_realloc(void *ptr, size_t size) {
-  void *res = my_realloc(ptr, size);
+  __my_free(ptr);
+  res = new_ptr;
   debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
-  return res;
-}
-
-void __my_free(void *ptr) {
-  my_free(ptr);
-  debug("%s(%p)", __func__, ptr);
-}
-
-void *__my_memalign(size_t alignment, size_t size) {
-  void *res = my_memalign(alignment, size);
-  debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+  pthread_mutex_unlock(&mutex);
   return res;
 }
 
 size_t __my_malloc_usable_size(void *ptr) {
-  int res = my_malloc_usable_size(ptr);
+  int res = (void *)get_boundary_tag(get_block(ptr)) - ptr;
   debug("%s(%p) = %d", __func__, ptr, res);
   return res;
 }

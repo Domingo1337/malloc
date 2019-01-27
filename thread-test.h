@@ -82,7 +82,6 @@ static void *_memalign(size_t alignment, size_t size) {
 }
 
 static void bin_alloc(struct bin *m, unsigned long size, int r) {
-    int b;
 #if TEST > 0
   if (mem_check(m->ptr, m->size)) {
     printf("memory corrupt!\n");
