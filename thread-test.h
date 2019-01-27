@@ -82,6 +82,7 @@ static void *_memalign(size_t alignment, size_t size) {
 }
 
 static void bin_alloc(struct bin *m, unsigned long size, int r) {
+    int b;
 #if TEST > 0
   if (mem_check(m->ptr, m->size)) {
     printf("memory corrupt!\n");
@@ -93,7 +94,7 @@ static void bin_alloc(struct bin *m, unsigned long size, int r) {
   if (r < 4) { /* memalign */
     if (m->size > 0)
       free(m->ptr);
-    m->ptr = (unsigned char *)_memalign(sizeof(void *) << r, size);
+    m->ptr = (unsigned char *)_memalign(2*sizeof(void *) << r, size);
   } else if (r < 20) { /* calloc */
     if (m->size > 0)
       free(m->ptr);
@@ -118,7 +119,6 @@ static void bin_alloc(struct bin *m, unsigned long size, int r) {
     m->ptr = (unsigned char *)malloc(size);
   }
   if (!m->ptr) {
-    printf("out of memory (r=%d, size=%ld)!\n", r, (long)size);
     exit(1);
   }
   m->size = size;

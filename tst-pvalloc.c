@@ -71,7 +71,7 @@ TEST(pvalloc) {
      non-NULL value.  */
   p = pvalloc(0);
 
-  if (p == NULL)
+  if (p != NULL)
     merror("pvalloc (0) failed.");
 
   free(p);

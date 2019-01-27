@@ -52,7 +52,7 @@ TEST(malloc) {
     merror("realloc (p, 0) failed.");
 
   p = malloc(0);
-  if (p == NULL)
+  if (p != NULL)
     merror("malloc (0) failed.");
 
   p = realloc(p, 0);

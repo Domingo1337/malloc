@@ -84,7 +84,6 @@ inline size_t round_up_to(size_t number, size_t multiple) {
 }
 
 mem_block_t *find_first_free_block(size_t size) {
-  debug("%s(%ld)->", __func__, size);
   int64_t isize = (int64_t)size;
   mem_arena_t *arena;
   mem_block_t *block;
@@ -149,7 +148,6 @@ bool should_delete(mem_arena_t *arena_to_delete) {
 }
 
 void *create_new_arena(size_t size) {
-  debug("%s(%lu)->", __func__, size);
   size_t arena_size = size + FREE_ARENA_SIZE;
   /* fit user size and empty block to indicate end of arena */
   arena_size = round_up_to(arena_size, getpagesize());
@@ -216,8 +214,6 @@ void dump_malloc() {
 
 /* dummies */
 void *my_memalign(size_t alignment, size_t size) {
-  debug("%s(%lu, %lu)->", __func__, alignment, size);
-
   if (size == 0) {
     return NULL;
   }
@@ -284,23 +280,17 @@ void *my_memalign(size_t alignment, size_t size) {
 }
 
 void *my_malloc(size_t size) {
-  debug("%s(%ld)->", __func__, size);
   if (size == 0) {
-
-    debug("malloc: %p\n", NULL);
     return NULL;
   }
   void *ptr = my_memalign(MB_ALIGNMENT, size);
   if (ptr == NULL && errno == ENOMEM) {
-    debug("malloc: ENOMEM\n");
     return NULL;
   }
-  debug("malloc: %p\n", ptr);
   return ptr;
 }
 
 void my_free(void *ptr) {
-  debug("%s(%p)\n", __func__, ptr);
   if (ptr == NULL)
     return;
 
@@ -332,19 +322,10 @@ void my_free(void *ptr) {
     prev = get_prev_block(current);
   }
 
-  // arena is empty
-  if (prev == NULL)
-    debug("prev is null\t\tnext@%p size: %ld\n", next, next->mb_size);
-  else
-    debug("prev@%p size: %ld\tnext@%p size: %ld\n", prev, prev->mb_size, next,
-          next->mb_size);
-
   mem_arena_t *arena = get_arena_from_block(current);
   if (prev == NULL && next->mb_size == 0 && should_delete(arena)) {
-    debug("arena is empty nauu\n");
     LIST_REMOVE(arena, ma_link);
-    assert(munmap(arena, arena->size + sizeof(mem_arena_t) + MIN_BLOCK_SIZE +
-                           sizeof(mem_block_t)) == 0);
+    assert(munmap(arena, arena->size + FREE_ARENA_SIZE) == 0);
   } else if (!prev_free && !next_free) {
     LIST_INSERT_HEAD(&arena->ma_freeblks, current, mb_link);
     set_boundary_tag(current);
@@ -354,10 +335,7 @@ void my_free(void *ptr) {
 }
 
 void *my_realloc(void *ptr, size_t size) {
-  debug("%s(%p, %ld)->", __func__, ptr, size);
-
   if (ptr == NULL && size == 0) {
-    debug("realloc: %p\n", NULL);
     return NULL;
   }
 
@@ -368,16 +346,16 @@ void *my_realloc(void *ptr, size_t size) {
     my_free(ptr);
     return NULL;
   }
+  
+  pthread_mutex_lock(&mutex);
 
   int64_t isize = isize;
 
   mem_block_t *current_block = get_block(ptr);
   void *tag_addr = (void *)get_boundary_tag(current_block);
-  debug("realloc: block@%p->boundary_tag_at@%p->", current_block, tag_addr);
   int64_t current_size = (void *)get_boundary_tag(current_block) - ptr;
   if (size < (size_t)current_size) {
     pthread_mutex_unlock(&mutex);
-    debug("realloc: (s: %ld, cs: %lu) %p\n", size, current_size, ptr);
     return ptr;
   }
 
@@ -404,21 +382,18 @@ void *my_realloc(void *ptr, size_t size) {
     }
 
     pthread_mutex_unlock(&mutex);
-    debug("realloc: %p\n", ptr);
     return ptr;
   }
 
   pthread_mutex_unlock(&mutex);
   void *new_ptr = my_malloc(size);
   if (new_ptr == NULL) {
-    debug("realloc: %p\n", NULL);
     return NULL;
   }
 
   memcpy(new_ptr, ptr, current_size);
 
   my_free(ptr);
-  debug("realloc: %p\n", new_ptr);
   return new_ptr;
 }
 
@@ -426,6 +401,8 @@ size_t my_malloc_usable_size(void *ptr) {
   // debug("%s(%p)", __func__, ptr);
   return get_block(ptr)->mb_size;
 }
+
+/* wrappers */
 
 void *__my_malloc(size_t size) {
   void *res = my_malloc(size);

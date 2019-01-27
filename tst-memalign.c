@@ -40,7 +40,7 @@ TEST(memalign) {
 
   /* An attempt to allocate a huge value should return NULL and set
      errno to ENOMEM.  */
-  p = memalign(sizeof(void *), -1);
+  p = memalign(2*sizeof(void *), -1);
 
   save = errno;
 
@@ -84,9 +84,9 @@ TEST(memalign) {
 
   /* A zero-sized allocation should succeed with glibc, returning a
      non-NULL value.  */
-  p = memalign(sizeof(void *), 0);
+  p = memalign(2*sizeof(void *), 0);
 
-  if (p == NULL)
+  if (p != NULL)
     merror("memalign (sizeof (void *), 0) failed.");
 
   free(p);

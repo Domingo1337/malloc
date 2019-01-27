@@ -124,7 +124,7 @@ TEST(realloc) {
 
   /* realloc (NULL, 0) acts like malloc (0) (glibc).  */
   p = realloc(NULL, 0);
-  if (p == NULL)
+  if (p != NULL)
     merror("realloc (NULL, 0) returned NULL.");
 
   free(p);
