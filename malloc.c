@@ -83,6 +83,22 @@ __constructor void __malloc_init(void) {
 
 /* helper functions */
 
+mem_block_t *find_first_free_block_aligned(size_t size, size_t alignment) {
+  mem_arena_t *arena;
+  mem_block_t *block;
+  LIST_FOREACH(arena, arenas, ma_link) {
+    LIST_FOREACH(block, &arena->ma_freeblks, mb_link) {
+      size_t block_size = (size_t)block->mb_size;
+      if (block_size >= size) {
+        void *aligned = (void *)align((size_t)block->mb_data, alignment);
+        if (block_size >= size + ((void *)block->mb_data - aligned))
+          return block;
+      }
+    }
+  }
+  return NULL;
+}
+
 mem_block_t *find_first_free_block(size_t size) {
   int64_t isize = (int64_t)size;
   mem_arena_t *arena;
@@ -298,20 +314,21 @@ void *__my_memalign(size_t alignment, size_t size) {
     return res;
   }
 
-  // we gotta make sure that the pointer can be aligned so we request a lil more
-  size = max(align(size + alignment, alignment), sizeof(mb_node_t));
+  // the block must fit the list node and be divisible by 16
+  size = max(align(size, alignment), sizeof(mb_node_t));
+  size_t maybe_size = align(size + alignment, alignment);
 
   pthread_mutex_lock(&mutex);
   mem_block_t *block;
 
   if (size > MA_MAXSIZE) {
     create_new_arena(size);
-    block = find_first_free_block(size);
+    block = find_first_free_block_aligned(size, alignment);
   } else {
-    block = find_first_free_block(size);
+    block = find_first_free_block_aligned(size, alignment);
     if (block == NULL) {
       create_new_arena(size);
-      block = find_first_free_block(size);
+      block = find_first_free_block_aligned(size, alignment);
     }
   }
 
@@ -322,6 +339,16 @@ void *__my_memalign(size_t alignment, size_t size) {
     debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
     return res;
   }
+
+  size_t difference =
+    align((size_t)block->mb_data, alignment) - (size_t)block->mb_data;
+  debug("difference = %lu - %lu = %lu)",
+        align((size_t)block->mb_data, alignment), (size_t)block->mb_data,
+        difference);
+  debug("size += %lu (%lu -> %lu)", difference, size, size + difference);
+  size += difference;
+  debug("%p is divisible by %lu (%lu)", block->mb_data + difference, alignment,
+        ((size_t)block->mb_data + difference) % alignment);
 
   int64_t free_mem = block->mb_size - size;
   if ((size_t)free_mem >= MIN_BLOCK_SIZE && size <= MA_MAXSIZE) {
@@ -338,7 +365,8 @@ void *__my_memalign(size_t alignment, size_t size) {
   block->mb_size *= -1;
   LIST_REMOVE(block, mb_link);
   set_boundary_tag(block);
-
+  debug("memalign just taken block:");
+  print_block(block);
   // align user ptr and fill empty space with zeros for free() convenience
   res = (void *)align((size_t)block->mb_data, alignment);
   memset(block->mb_data, 0, res - (void *)block->mb_data);
