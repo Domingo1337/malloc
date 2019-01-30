@@ -83,10 +83,6 @@ __constructor void __malloc_init(void) {
 
 /* helper functions */
 
-inline size_t round_up_to(size_t number, size_t multiple) {
-  return (number + multiple - 1) / multiple * multiple;
-}
-
 mem_block_t *find_first_free_block(size_t size) {
   int64_t isize = (int64_t)size;
   mem_arena_t *arena;
@@ -154,7 +150,7 @@ bool should_delete(mem_arena_t *arena_to_delete) {
 void *create_new_arena(size_t size) {
   size_t arena_size = size + FREE_ARENA_SIZE;
   /* fit user size and empty block to indicate end of arena */
-  arena_size = round_up_to(arena_size, getpagesize());
+  arena_size = align(arena_size, getpagesize());
 
   mem_arena_t *arena = mmap(NULL, arena_size, PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -178,7 +174,6 @@ void *create_new_arena(size_t size) {
   mem_block_t *last = get_next_block(block);
   last->mb_size = 0;
   set_boundary_tag(last);
-  debug("arena@%p ends with block@%p", arena, last);
 
   return block;
 }
@@ -322,7 +317,6 @@ void *__my_memalign(size_t alignment, size_t size) {
 
   if (block == NULL) {
     errno = ENOMEM;
-
     pthread_mutex_unlock(&mutex);
     res = NULL;
     debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
@@ -346,7 +340,7 @@ void *__my_memalign(size_t alignment, size_t size) {
   set_boundary_tag(block);
 
   // align user ptr and fill empty space with zeros for free() convenience
-  res = (void *)round_up_to((size_t)block->mb_data, alignment);
+  res = (void *)align((size_t)block->mb_data, alignment);
   memset(block->mb_data, 0, res - (void *)block->mb_data);
 
   pthread_mutex_unlock(&mutex);
@@ -355,14 +349,7 @@ void *__my_memalign(size_t alignment, size_t size) {
 }
 
 void *__my_malloc(size_t size) {
-  void *res;
-  if (size == 0) {
-    res = NULL;
-    debug("%s(%ld) = %p", __func__, size, res);
-    return res;
-  }
-
-  res = __my_memalign(MB_ALIGNMENT, size);
+  void *res = size == 0 ? NULL : __my_memalign(MB_ALIGNMENT, size);
   debug("%s(%ld) = %p", __func__, size, res);
   return res;
 }
@@ -399,8 +386,6 @@ void __my_free(void *ptr) {
     set_boundary_tag(current);
     prev = get_prev_block(current);
   }
-
-  assert(current->mb_size > 0);
 
   mem_arena_t *arena = get_arena_from_block(current);
   if (prev == NULL && next->mb_size == 0 && should_delete(arena)) {
@@ -439,11 +424,14 @@ void *__my_realloc(void *ptr, size_t size) {
 
   pthread_mutex_lock(&mutex);
 
-  int64_t isize = isize;
+  size_t maybe_size = align(size, MB_ALIGNMENT);
+  if (maybe_size < size)
+    return NULL;
+
+  size = maybe_size;
 
   mem_block_t *current_block = get_block(ptr);
   int64_t current_size = (void *)get_boundary_tag(current_block) - ptr;
-
   if (size < (size_t)current_size) {
     pthread_mutex_unlock(&mutex);
     res = ptr;
@@ -481,11 +469,10 @@ void *__my_realloc(void *ptr, size_t size) {
 
   pthread_mutex_unlock(&mutex);
   void *new_ptr = __my_malloc(size);
-  pthread_mutex_lock(&mutex);
+
   if (new_ptr == NULL) {
     res = NULL;
     debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
-    pthread_mutex_unlock(&mutex);
     return res;
   }
 
@@ -494,7 +481,6 @@ void *__my_realloc(void *ptr, size_t size) {
   __my_free(ptr);
   res = new_ptr;
   debug("%s(%p, %ld) = %p", __func__, ptr, size, res);
-  pthread_mutex_unlock(&mutex);
   return res;
 }
 
