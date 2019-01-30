@@ -286,90 +286,132 @@ bool check_integrity() {
     }
   }
   debug("integrity ok");
+  //   print_all();
   return true;
 }
 
 /* functions */
 
 void *__my_memalign(size_t alignment, size_t size) {
-  void *res;
+  void *res = NULL;
 
   if (size == 0) {
-    res = NULL;
     debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
     return res;
   }
 
   if (size >= MAX_MEM) {
     errno = ENOMEM;
-    res = NULL;
     debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
     return res;
   }
 
   if (!powerof2(alignment) || alignment == 0 || alignment % MB_ALIGNMENT != 0) {
     errno = EINVAL;
-    res = NULL;
     debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
     return res;
   }
 
-  // the block must fit the list node and be divisible by 16
-  size = max(align(size, alignment), sizeof(mb_node_t));
-  size_t maybe_size = align(size + alignment, alignment);
+  // the block must fit the list node and be divisible by it
+  size = align(max(size, alignment), sizeof(mb_node_t));
+  //   size_t maybe_size = align(size + alignment, alignment);
 
   pthread_mutex_lock(&mutex);
   mem_block_t *block;
 
+  // big blocks get their own arena
   if (size > MA_MAXSIZE) {
     create_new_arena(size);
     block = find_first_free_block_aligned(size, alignment);
+
+    if (block == NULL) {
+      errno = ENOMEM;
+      res = NULL;
+      debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+      pthread_mutex_unlock(&mutex);
+      return res;
+    }
+    print_all();
+
+    LIST_REMOVE(block, mb_link);
+
+    // align user ptr and fill empty space with zeros for free() convenience
+    res = (void *)align((size_t)block->mb_data, alignment);
+    memset(block->mb_data, 0, res - (void *)block->mb_data);
+
   } else {
     block = find_first_free_block_aligned(size, alignment);
     if (block == NULL) {
       create_new_arena(size);
       block = find_first_free_block_aligned(size, alignment);
     }
-  }
+    if (block == NULL) {
+      errno = ENOMEM;
+      res = NULL;
+      debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+      pthread_mutex_unlock(&mutex);
+      return res;
+    }
 
-  if (block == NULL) {
-    errno = ENOMEM;
-    pthread_mutex_unlock(&mutex);
-    res = NULL;
-    debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
-    return res;
-  }
+    void *data = block->mb_data;
+    void *aligned_data = (void *)align((size_t)data, alignment);
+    size_t aligned_diff = aligned_data - data;
 
-  size_t difference =
-    align((size_t)block->mb_data, alignment) - (size_t)block->mb_data;
-  debug("difference = %lu - %lu = %lu)",
-        align((size_t)block->mb_data, alignment), (size_t)block->mb_data,
-        difference);
-  debug("size += %lu (%lu -> %lu)", difference, size, size + difference);
-  size += difference;
-  debug("%p is divisible by %lu (%lu)", block->mb_data + difference, alignment,
-        ((size_t)block->mb_data + difference) % alignment);
+    // try to split the block to the right
+    int64_t new_size = size + aligned_diff;
+    int64_t free_mem = block->mb_size - new_size;
+    if (free_mem > 0 && (size_t)free_mem >= MIN_BLOCK_SIZE) {
+      //   debug("will split :-) [free_mem: %ld, new_size: %lu]", free_mem,
+      //   new_size);
+      block->mb_size = new_size;
 
-  int64_t free_mem = block->mb_size - size;
-  if ((size_t)free_mem >= MIN_BLOCK_SIZE && size <= MA_MAXSIZE) {
-    block->mb_size = size;
+      mem_block_t *next_block = get_next_block(block);
+      next_block->mb_size = free_mem - FREE_BLOCK_SIZE;
+      set_boundary_tag(next_block);
 
-    mem_block_t *new_block = get_next_block(block);
-    new_block->mb_size = free_mem - FREE_BLOCK_SIZE;
-    set_boundary_tag(new_block);
+      LIST_INSERT_AFTER(block, next_block, mb_link);
+    }
 
-    LIST_INSERT_AFTER(block, new_block, mb_link);
+    LIST_REMOVE(block, mb_link);
+
+    /*
+    // try to split the block to the left
+    int64_t block_size = block->mb_size;
+    if (aligned_diff >= MIN_BLOCK_SIZE) {
+      block->mb_size = aligned_diff - FREE_BLOCK_SIZE;
+      set_boundary_tag(block);
+      mem_arena_t *arena = get_arena_from_block(block);
+      LIST_INSERT_HEAD(&arena->ma_freeblks, block, mb_link);
+
+      block = get_next_block(block);
+      block->mb_size = block_size - aligned_diff;
+
+    } else { // can't create new block, give aligned_diff to the previous one
+      mem_block_t *prev_block = get_prev_block(block);
+
+      // block is first on the list we can't do much, but leave the extra bits
+      if (prev_block == NULL) {
+        res = aligned_data;
+        memset(block->mb_data, 0, res - (void *)block->mb_data);
+      } else {
+        // move block metadata to fit the aligned ptr
+        block = (mem_block_t *)((void *)block + aligned_diff);
+        block->mb_size = block_size;
+
+        // prev block must be taken so we decrement it's size
+        prev_block->mb_size -= aligned_diff;
+        set_boundary_tag(prev_block);
+      }
+    }
+    */
+   
+    res = (void *)align((size_t)block->mb_data, alignment);
+    memset(block->mb_data, 0, res - (void *)block->mb_data);
   }
 
   assert(block->mb_size > 0);
   block->mb_size *= -1;
-  LIST_REMOVE(block, mb_link);
   set_boundary_tag(block);
-  debug("memalign just taken block:");
-  print_block(block);
-  // align user ptr and fill empty space with zeros for free() convenience
-  res = (void *)align((size_t)block->mb_data, alignment);
-  memset(block->mb_data, 0, res - (void *)block->mb_data);
 
   pthread_mutex_unlock(&mutex);
   debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
@@ -478,12 +520,12 @@ void *__my_realloc(void *ptr, size_t size) {
       current_block->mb_size = -size;
       set_boundary_tag(current_block);
 
-      mem_block_t *new_block = get_next_block(current_block);
-      new_block->mb_size = possible_new_size - FREE_BLOCK_SIZE;
-      set_boundary_tag(new_block);
+      mem_block_t *next_block = get_next_block(current_block);
+      next_block->mb_size = possible_new_size - FREE_BLOCK_SIZE;
+      set_boundary_tag(next_block);
 
       mem_arena_t *arena = get_arena_from_block(current_block);
-      LIST_INSERT_HEAD(&arena->ma_freeblks, new_block, mb_link);
+      LIST_INSERT_HEAD(&arena->ma_freeblks, next_block, mb_link);
     } else {
       current_block->mb_size = -possible_size;
       set_boundary_tag(current_block);
