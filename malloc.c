@@ -83,6 +83,26 @@ __constructor void __malloc_init(void) {
 
 /* helper functions */
 
+void insert_to_freeblocks(mem_arena_t *arena, mem_block_t *block) {
+  assert((size_t)block->mb_size >= sizeof(mb_node_t));
+
+  mem_block_t *current;
+  mem_block_t *prev = NULL;
+  LIST_FOREACH(current, &arena->ma_freeblks, mb_link) {
+    if (current > block) {
+      LIST_INSERT_BEFORE(current, block, mb_link);
+      return;
+    } else {
+      prev = current;
+    }
+  }
+  if (prev == NULL) {
+    LIST_INSERT_HEAD(&arena->ma_freeblks, block, mb_link);
+  } else {
+    LIST_INSERT_AFTER(prev, block, mb_link);
+  }
+}
+
 mem_block_t *find_first_free_block_aligned(size_t size, size_t alignment) {
   mem_arena_t *arena;
   mem_block_t *block;
@@ -374,8 +394,7 @@ void *__my_memalign(size_t alignment, size_t size) {
       block->mb_size = aligned_diff - FREE_BLOCK_SIZE;
       set_boundary_tag(block);
 
-      mem_arena_t *arena = get_arena_from_block(block);
-      LIST_INSERT_HEAD(&arena->ma_freeblks, block, mb_link);
+      insert_to_freeblocks(get_arena_from_block(block), block);
 
       block = get_next_block(block);
       block->mb_size = block_size - aligned_diff;
@@ -446,7 +465,7 @@ void __my_free(void *ptr) {
     current = prev;
     prev = get_prev_block(current);
   } else {
-    LIST_INSERT_HEAD(&arena->ma_freeblks, current, mb_link);
+    insert_to_freeblocks(arena, current);
   }
 
   if (prev == NULL && next->mb_size == 0 && check_arena(arena)) {
@@ -455,7 +474,7 @@ void __my_free(void *ptr) {
   } else {
     set_boundary_tag(current);
   }
-  
+
   pthread_mutex_unlock(&mutex);
 }
 
