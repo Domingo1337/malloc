@@ -91,7 +91,7 @@ mem_block_t *find_first_free_block_aligned(size_t size, size_t alignment) {
       size_t block_size = (size_t)block->mb_size;
       if (block_size >= size) {
         void *aligned = (void *)align((size_t)block->mb_data, alignment);
-        if (block_size >= size + ((void *)block->mb_data - aligned))
+        if (block_size >= size + (aligned - (void *)block->mb_data))
           return block;
       }
     }
@@ -281,12 +281,11 @@ bool check_integrity() {
   LIST_FOREACH(arena, arenas, ma_link) {
     if (!check_arena(arena)) {
       debug("%s failed", __func__);
-      print_all();
-      exit(1);
+      print_arena(arena);
+      exit(EXIT_FAILURE);
     }
   }
   debug("integrity ok");
-  //   print_all();
   return true;
 }
 
@@ -312,9 +311,8 @@ void *__my_memalign(size_t alignment, size_t size) {
     return res;
   }
 
-  // the block must fit the list node and be divisible by it
-  size = align(max(size, alignment), sizeof(mb_node_t));
-  //   size_t maybe_size = align(size + alignment, alignment);
+  // block must fit the list node
+  size = max(size, sizeof(mb_node_t));
 
   pthread_mutex_lock(&mutex);
   mem_block_t *block;
@@ -331,7 +329,6 @@ void *__my_memalign(size_t alignment, size_t size) {
       pthread_mutex_unlock(&mutex);
       return res;
     }
-    print_all();
 
     LIST_REMOVE(block, mb_link);
 
@@ -342,13 +339,12 @@ void *__my_memalign(size_t alignment, size_t size) {
   } else {
     block = find_first_free_block_aligned(size, alignment);
     if (block == NULL) {
-      create_new_arena(size);
+      create_new_arena(size + alignment);
       block = find_first_free_block_aligned(size, alignment);
     }
     if (block == NULL) {
       errno = ENOMEM;
       res = NULL;
-      debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
       pthread_mutex_unlock(&mutex);
       return res;
     }
@@ -361,8 +357,6 @@ void *__my_memalign(size_t alignment, size_t size) {
     int64_t new_size = size + aligned_diff;
     int64_t free_mem = block->mb_size - new_size;
     if (free_mem > 0 && (size_t)free_mem >= MIN_BLOCK_SIZE) {
-      //   debug("will split :-) [free_mem: %ld, new_size: %lu]", free_mem,
-      //   new_size);
       block->mb_size = new_size;
 
       mem_block_t *next_block = get_next_block(block);
@@ -374,47 +368,41 @@ void *__my_memalign(size_t alignment, size_t size) {
 
     LIST_REMOVE(block, mb_link);
 
-    /*
     // try to split the block to the left
     int64_t block_size = block->mb_size;
     if (aligned_diff >= MIN_BLOCK_SIZE) {
       block->mb_size = aligned_diff - FREE_BLOCK_SIZE;
       set_boundary_tag(block);
+
       mem_arena_t *arena = get_arena_from_block(block);
       LIST_INSERT_HEAD(&arena->ma_freeblks, block, mb_link);
 
       block = get_next_block(block);
       block->mb_size = block_size - aligned_diff;
 
-    } else { // can't create new block, give aligned_diff to the previous one
+    } else {
+      // can't create new block, try to give unused aligned_diff to the prev one
       mem_block_t *prev_block = get_prev_block(block);
-
-      // block is first on the list we can't do much, but leave the extra bits
       if (prev_block == NULL) {
+        // block is first on the list we can't do much, but zero the extra bytes
         res = aligned_data;
         memset(block->mb_data, 0, res - (void *)block->mb_data);
-      } else {
-        // move block metadata to fit the aligned ptr
-        block = (mem_block_t *)((void *)block + aligned_diff);
-        block->mb_size = block_size;
-
-        // prev block must be taken so we decrement it's size
+      } else if (aligned_diff > 0) {
         prev_block->mb_size -= aligned_diff;
         set_boundary_tag(prev_block);
+        block = (mem_block_t *)((void *)block + aligned_diff);
+        block->mb_size = block_size - aligned_diff;
       }
     }
-    */
-   
     res = (void *)align((size_t)block->mb_data, alignment);
-    memset(block->mb_data, 0, res - (void *)block->mb_data);
   }
 
   assert(block->mb_size > 0);
   block->mb_size *= -1;
   set_boundary_tag(block);
 
-  pthread_mutex_unlock(&mutex);
   debug("%s(%ld, %ld) = %p", __func__, alignment, size, res);
+  pthread_mutex_unlock(&mutex);
   return res;
 }
 
@@ -430,42 +418,44 @@ void __my_free(void *ptr) {
     return;
 
   pthread_mutex_lock(&mutex);
+
   mem_block_t *current = get_block(ptr);
   mem_block_t *prev = get_prev_block(current);
   mem_block_t *next = get_next_block(current);
-
-  current->mb_size = abs(current->mb_size);
-
-  bool next_free = next->mb_size > 0;
-  bool prev_free = prev != NULL && prev->mb_size > 0;
-
-  if (next_free) {
-    current->mb_size =
-      current->mb_size + next->mb_size + sizeof(int64_t) + sizeof(bdtag_t);
-    if (!prev_free) {
-      LIST_INSERT_BEFORE(next, current, mb_link);
-      set_boundary_tag(current);
-    }
-    LIST_REMOVE(next, mb_link);
-    next = get_next_block(current);
-  }
-  if (prev_free) {
-    prev->mb_size =
-      current->mb_size + prev->mb_size + sizeof(int64_t) + sizeof(bdtag_t);
-    current = prev;
-    set_boundary_tag(current);
-    prev = get_prev_block(current);
-  }
-
   mem_arena_t *arena = get_arena_from_block(current);
-  if (prev == NULL && next->mb_size == 0 && should_delete(arena)) {
+  bool prev_free = prev != NULL && prev->mb_size > 0;
+  bool next_free = next->mb_size > 0;
+
+  assert(current->mb_size < 0);
+  current->mb_size *= -1;
+
+  // pretty much self-explanatory
+  if (next_free && prev_free) {
+    LIST_REMOVE(next, mb_link);
+    prev->mb_size += current->mb_size + next->mb_size + 2 * FREE_BLOCK_SIZE;
+    current = prev;
+    prev = get_prev_block(current);
+    next = get_next_block(current);
+  } else if (next_free) {
+    LIST_INSERT_BEFORE(next, current, mb_link);
+    LIST_REMOVE(next, mb_link);
+    current->mb_size += next->mb_size + FREE_BLOCK_SIZE;
+    next = get_next_block(current);
+  } else if (prev_free) {
+    prev->mb_size += current->mb_size + FREE_BLOCK_SIZE;
+    current = prev;
+    prev = get_prev_block(current);
+  } else {
+    LIST_INSERT_HEAD(&arena->ma_freeblks, current, mb_link);
+  }
+
+  if (prev == NULL && next->mb_size == 0 && check_arena(arena)) {
     LIST_REMOVE(arena, ma_link);
     assert(munmap(arena, arena->size + FREE_ARENA_SIZE) == 0);
-  } else if (!prev_free && !next_free) {
-    LIST_INSERT_HEAD(&arena->ma_freeblks, current, mb_link);
+  } else {
     set_boundary_tag(current);
   }
-
+  
   pthread_mutex_unlock(&mutex);
 }
 
